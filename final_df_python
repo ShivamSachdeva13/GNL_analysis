@@ -1,0 +1,263 @@
+import numpy as np # linear algebra
+import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
+
+#Supporting function
+#For filtering data based on continous bintix uids
+#For calculating new factor
+
+def raw_data_filtering_and_factor_calculation(input_file,city_id_list,category_dict,p1_start_month,p1_end_month,p2_start_month,p2_end_month):#format of category ["sscat","KIDS FLAKES"]
+    
+    all_months_in_total_period = list(range(p1_start_month,p1_end_month+1)) +  list(range(p2_start_month,p2_end_month+1))
+    city_filtered = input_file.loc[input_file.city_id.isin(city_id_list)] 
+    city_time_filtered = city_filtered.loc[city_filtered.month_adj.isin(all_months_in_total_period)]
+
+
+    tghh = 0
+    for i in range(len(city_id_list)):
+        tghh += city_time_filtered.loc[city_time_filtered.city_id == city_id_list[i]].groupby("month_adj").tghh.first().mean()
+    
+    sample_bintix_uid = set(city_time_filtered.loc[city_time_filtered.month_adj==all_months_in_total_period[0]].bintix_uid.unique())
+    for a in all_months_in_total_period[1:]:
+        sample_bintix_uid = sample_bintix_uid.intersection(set(city_time_filtered.loc[city_time_filtered.month_adj==a].bintix_uid.unique()))
+    factor = tghh/len(sample_bintix_uid)
+
+    city_time_category_filtered = city_time_filtered
+    for a in category_dict:
+        city_time_category_filtered = city_time_category_filtered.loc[eval("city_time_category_filtered."+ a + category_dict[a])]
+    city_time_category_filtered_trimmed_sample = city_time_category_filtered.loc[city_time_category_filtered.bintix_uid.isin(list(sample_bintix_uid))]
+   #     return [city_time_category_filtered_trimmed_sample,factor]
+    return [city_time_category_filtered_trimmed_sample,factor]
+    
+    
+    
+    #Main function
+    
+def GNL_analysis(p1_start_month,p1_end_month,p2_start_month,p2_end_month,ref_brand,city_id_list,category_dict,raw_data): 
+    #ref_brand is a list which contains name of brand,sub_brand,variant but only upto the level which we want.
+    
+    input_file,factor_p1_p2 = raw_data_filtering_and_factor_calculation(raw_data,city_id_list,category_dict,p1_start_month,p1_end_month,p2_start_month,p2_end_month)
+    
+    #basic filtering,tagging,grouping
+    p1 = list(range(p1_start_month,p1_end_month+1))
+    p2 = list(range(p2_start_month,p2_end_month+1))
+    relevant_columns = ["bintix_uid","brand","sub_brand","variant","std_unit_value","volume"]
+    p1_purchases = input_file.loc[input_file.month_adj.isin(p1),relevant_columns]
+    p2_purchases = input_file.loc[input_file.month_adj.isin(p2),relevant_columns]
+    
+    for a in [p1_purchases,p2_purchases] : 
+        if len(ref_brand) == 1:
+            a.loc[:,["brand_other"]] = np.where(a.brand==ref_brand[0],"brand","other")
+        if len(ref_brand) == 2:
+            a.loc[:,["brand_other"]] = np.where((a.brand==ref_brand[0])&(a.sub_brand==ref_brand[1]),"brand","other")
+        if len(ref_brand) == 3:
+            a.loc[:,["brand_other"]] = np.where((a.brand==ref_brand[0])&(a.sub_brand==ref_brand[1])&(a.variant==ref_brand[2]),"brand","other")
+#         if len(ref_brand) == 4:
+#             a.loc[:,["brand_other"]] = np.where((a.brand==ref_brand[0])&(a.sub_brand==ref_brand[1])&(a.variant==ref_brand[2])&(eval("a.std_unit_value" +ref_brand[3])),"brand","other")
+        
+    grouped_p1 = p1_purchases.groupby(["bintix_uid","brand_other"]).volume.sum().reset_index()
+    grouped_p2 = p2_purchases.groupby(["bintix_uid","brand_other"]).volume.sum().reset_index()
+    
+    
+    
+    #removing unwanted uids - nonbrand buyers for both period
+    other_uid_p1 = grouped_p1.loc[grouped_p1.brand_other=="other"].bintix_uid.unique()
+    brand_uid_p1 = grouped_p1.loc[grouped_p1.brand_other=="brand"].bintix_uid.unique()
+    other_uid_p2 = grouped_p2.loc[grouped_p2.brand_other=="other"].bintix_uid.unique()
+    brand_uid_p2 = grouped_p2.loc[grouped_p2.brand_other=="brand"].bintix_uid.unique()
+    p1_uid_only_others = grouped_p1.loc[grouped_p1.bintix_uid.isin(other_uid_p1)&(~grouped_p1.bintix_uid.isin(brand_uid_p1))].bintix_uid.unique()
+    p2_uid_only_others = grouped_p2.loc[grouped_p2.bintix_uid.isin(other_uid_p2)&(~grouped_p2.bintix_uid.isin(brand_uid_p2))].bintix_uid.unique()
+    p1_unwanted_uid = set(p1_uid_only_others)-set(brand_uid_p2)
+    p2_unwanted_uid = set(p2_uid_only_others)-set(brand_uid_p1)
+    grouped_p1_filtered = grouped_p1.loc[~grouped_p1.bintix_uid.isin(p1_unwanted_uid)]
+    grouped_p2_filtered = grouped_p2.loc[~grouped_p2.bintix_uid.isin(p2_unwanted_uid)]
+    merged = pd.merge(grouped_p1_filtered,grouped_p2_filtered,on=["bintix_uid","brand_other"],how="outer").sort_values(by="bintix_uid")
+    
+    #Segmenting
+    new_uid = set(brand_uid_p2) - set(brand_uid_p1) - set(other_uid_p1)
+    lapsed_uid = set(brand_uid_p1) - set(brand_uid_p2) - set(other_uid_p2)
+    volume_change_uid = set(set(brand_uid_p1)-set(other_uid_p1)).intersection(set(brand_uid_p2)-set(other_uid_p2))
+    switch_and_vol_change_uid = set(merged.bintix_uid) - new_uid - lapsed_uid - volume_change_uid
+    possible_dropped_repertoire_uid = set(brand_uid_p1) - set(brand_uid_p2)
+    possible_added_repertoire_uid = set(brand_uid_p2) - set(brand_uid_p1)
+    
+    
+    #tagging
+    merged.loc[merged.bintix_uid.isin(new_uid),["type_of_inc_dec"]] = "new"
+    merged.loc[merged.bintix_uid.isin(lapsed_uid),["type_of_inc_dec"]] = "lapsed"
+    merged.loc[(merged.bintix_uid.isin(volume_change_uid))&(merged.volume_y>merged.volume_x),["type_of_inc_dec"]] = "increase_buying"
+    merged.loc[(merged.bintix_uid.isin(volume_change_uid))&(merged.volume_y<merged.volume_x),["type_of_inc_dec"]] = "decrease_buying"
+    merged.loc[(merged.bintix_uid.isin(volume_change_uid))&(merged.volume_y==merged.volume_x),["type_of_inc_dec"]] = "same_buying"
+    merged.loc[merged.bintix_uid.isin(switch_and_vol_change_uid),["type_of_inc_dec"]]="switching and volume change"
+    
+    
+    #calculating gain/loss
+    gain_new = merged.loc[(merged.brand_other=="brand") & (merged.type_of_inc_dec=="new")].volume_y.sum()/1000
+    loss_lapsed = merged.loc[(merged.brand_other=="brand") & (merged.type_of_inc_dec=="lapsed")].volume_x.sum()/1000
+    gain_inc_buying_solus = (merged.loc[(merged.brand_other=="brand") & (merged.type_of_inc_dec=="increase_buying")].volume_y.sum() - merged.loc[(merged.brand_other=="brand") & (merged.type_of_inc_dec=="increase_buying")].volume_x.sum())/1000
+    loss_dec_buying_solus = -(merged.loc[(merged.brand_other=="brand") & (merged.type_of_inc_dec=="decrease_buying")].volume_y.sum() - merged.loc[(merged.brand_other=="brand") & (merged.type_of_inc_dec=="decrease_buying")].volume_x.sum())/1000
+    merged.volume_x.fillna(0,inplace=True)
+    merged.volume_y.fillna(0,inplace=True)
+    gain_switch_and_vol_change = (merged.loc[(merged.brand_other=="brand") & (merged.type_of_inc_dec=="switching and volume change") & (merged.volume_y>merged.volume_x)].volume_y.sum() - merged.loc[(merged.brand_other=="brand") & (merged.type_of_inc_dec=="switching and volume change") & (merged.volume_y>merged.volume_x)].volume_x.sum())/1000
+    loss_switch_and_vol_change = -(merged.loc[(merged.brand_other=="brand") & (merged.type_of_inc_dec=="switching and volume change") & (merged.volume_y<merged.volume_x)].volume_y.sum() - merged.loc[(merged.brand_other=="brand") & (merged.type_of_inc_dec=="switching and volume change") & (merged.volume_y<merged.volume_x)].volume_x.sum())/1000
+    
+    
+    #switching_pattern
+    all_purchases = pd.concat([p1_purchases,p2_purchases])
+    all_wanted_uid_purchases = all_purchases.loc[~all_purchases.bintix_uid.isin(p1_unwanted_uid.union(p2_unwanted_uid))]
+    if len(ref_brand)==1:
+        all_wanted_uid_purchases.loc[:,["brand_sub_brand"]] = all_wanted_uid_purchases.brand
+    if len(ref_brand)==2:
+        all_wanted_uid_purchases.loc[:,["brand_sub_brand"]] = all_wanted_uid_purchases.brand + "-" + all_wanted_uid_purchases.sub_brand
+    if len(ref_brand)==3:
+        all_wanted_uid_purchases.loc[:,["brand_sub_brand"]] = all_wanted_uid_purchases.brand + "-" + all_wanted_uid_purchases.sub_brand + "-" + all_wanted_uid_purchases.variant
+#     if len(ref_brand)==4
+    unique_brand_sub_brand = all_wanted_uid_purchases.brand_sub_brand.unique()
+    gain_due_to = dict()
+    loss_due_to = dict()
+    gain_due_to["increased_buying"] = 0
+    loss_due_to["decreased_buying"] = 0
+    added_to_repertoire = 0
+    dropped_from_repertoire = 0
+    
+    for a in unique_brand_sub_brand:
+        gain_due_to[a] = 0
+        loss_due_to[a] = 0
+    for uid in list(switch_and_vol_change_uid):
+        p1_uid_purchase = p1_purchases.loc[p1_purchases.bintix_uid == uid]
+        if len(ref_brand)==1:
+            p1_uid_purchase.loc[:,["brand_sub_brand"]] = p1_uid_purchase.brand
+        if len(ref_brand)==2:
+            p1_uid_purchase.loc[:,["brand_sub_brand"]] = p1_uid_purchase.brand + "-" + p1_uid_purchase.sub_brand
+        if len(ref_brand)==3:
+            p1_uid_purchase.loc[:,["brand_sub_brand"]] = p1_uid_purchase.brand + "-" + p1_uid_purchase.sub_brand + "-" + p1_uid_purchase.variant
+#         if len(ref_brand)==4
+        p1_uid_grouped = p1_uid_purchase.groupby("brand_sub_brand").volume.sum().reset_index()
+        
+        p2_uid_purchase = p2_purchases.loc[p2_purchases.bintix_uid == uid]
+        if len(ref_brand)==1:
+            p2_uid_purchase.loc[:,["brand_sub_brand"]] = p2_uid_purchase.brand
+        if len(ref_brand)==2:
+            p2_uid_purchase.loc[:,["brand_sub_brand"]] = p2_uid_purchase.brand + "-" + p2_uid_purchase.sub_brand
+        if len(ref_brand)==3:
+            p2_uid_purchase.loc[:,["brand_sub_brand"]] = p2_uid_purchase.brand + "-" + p2_uid_purchase.sub_brand + "-" + p2_uid_purchase.variant
+#         if len(ref_brand)==4
+        p2_uid_grouped = p2_uid_purchase.groupby("brand_sub_brand").volume.sum().reset_index()
+        
+        merged_switching = p1_uid_grouped.merge(p2_uid_grouped, on = "brand_sub_brand", how = "outer")
+        merged_switching.fillna(0,inplace=True)
+        merged_switching.loc[:,["volume_diff"]] = merged_switching.volume_y - merged_switching.volume_x
+        vol_diff_uid = merged_switching.volume_diff.sum()
+        
+        if vol_diff_uid<0:
+            merged_switching = pd.concat([merged_switching,pd.DataFrame({"brand_sub_brand":["decreased_buying"],"volume_x":[0],"volume_y":[0],"volume_diff":[-vol_diff_uid]})])
+        elif vol_diff_uid>0:
+            merged_switching = pd.concat([merged_switching,pd.DataFrame({"brand_sub_brand":["increased_buying"],"volume_x":[0],"volume_y":[0],"volume_diff":[-vol_diff_uid]})])
+        merged_switching.loc[:,["sign"]] = np.where(merged_switching.volume_diff<0,"negative","non_negative") 
+        sign_desired_brand = merged_switching.loc[merged_switching.brand_sub_brand == "-".join(ref_brand)].iloc[0]["sign"]
+        factor_for_assigning_gain_loss = merged_switching.loc[merged_switching.brand_sub_brand == "-".join(ref_brand)].iloc[0]["volume_diff"]/merged_switching.loc[merged_switching.sign == sign_desired_brand].volume_diff.sum()
+        if sign_desired_brand == "negative":
+            for a in merged_switching.loc[merged_switching.sign != sign_desired_brand].brand_sub_brand:
+                if (a=="decreased_buying") and (uid in possible_dropped_repertoire_uid):
+                    dropped_from_repertoire += merged_switching.loc[merged_switching.brand_sub_brand == a].iloc[0]["volume_diff"]*factor_for_assigning_gain_loss
+                else:
+                    loss_due_to[a] -= merged_switching.loc[merged_switching.brand_sub_brand == a].iloc[0]["volume_diff"]*factor_for_assigning_gain_loss
+
+        else:
+            for a in merged_switching.loc[merged_switching.sign != sign_desired_brand].brand_sub_brand:
+                if (a=="increased_buying") and (uid in possible_added_repertoire_uid):
+                    added_to_repertoire +=  merged_switching.loc[merged_switching.brand_sub_brand == a].iloc[0]["volume_diff"]*factor_for_assigning_gain_loss
+                else:
+                    gain_due_to[a] -= merged_switching.loc[merged_switching.brand_sub_brand == a].iloc[0]["volume_diff"]*factor_for_assigning_gain_loss
+
+
+    for a in unique_brand_sub_brand:
+        if gain_due_to[a]==0 and loss_due_to[a]==0:
+            del gain_due_to[a]
+            del loss_due_to[a]
+    
+    #adjustment. gain/loss due to volume change seperated from switching
+    dropped_from_repertoire = abs(dropped_from_repertoire)/1000
+    added_to_repertoire = abs(added_to_repertoire)/1000
+    gain_switch = gain_switch_and_vol_change - abs(gain_due_to["increased_buying"])/1000 - added_to_repertoire
+    loss_switch = loss_switch_and_vol_change - abs(loss_due_to["decreased_buying"])/1000 - dropped_from_repertoire
+    gain_inc_buying = gain_inc_buying_solus + abs(gain_due_to["increased_buying"])/1000
+    loss_dec_buying = loss_dec_buying_solus + abs(loss_due_to["decreased_buying"])/1000
+
+    
+    del gain_due_to["increased_buying"]
+    del loss_due_to["decreased_buying"]
+    
+    #results
+    gain_brand_switch_list = [round(x*factor_p1_p2/1000) for x in gain_due_to.values()]
+    loss_brand_switch_list = [round(x*factor_p1_p2/1000) for x in loss_due_to.values()]
+    gain = [round(x*factor_p1_p2) for x in [gain_new,gain_inc_buying,gain_switch,added_to_repertoire]]
+    loss= [round(x*factor_p1_p2) for x in [-loss_lapsed,-loss_dec_buying,-loss_switch,-dropped_from_repertoire]]
+    net_gain = factor_p1_p2*(p2_purchases.loc[p2_purchases.brand_other=="brand"].volume.sum() - p1_purchases.loc[p1_purchases.brand_other=="brand"].volume.sum())
+    
+    
+    #Intercation Index
+    interaction_df = pd.DataFrame({"Brands":gain_due_to.keys(),"abs_gain":gain_brand_switch_list,"abs_loss":[abs(x) for x in loss_brand_switch_list]})
+    interaction_df.loc[:,["total_gain_loss_brand"]] = interaction_df.abs_gain + interaction_df.abs_loss
+    interaction_df.loc[:,["percent_gain_loss"]] = (interaction_df.total_gain_loss_brand/interaction_df.total_gain_loss_brand.sum())*100
+    volume_share_list=[]
+    if len(ref_brand)==1:
+        all_purchases_without_brand = all_purchases.loc[~(all_purchases.brand==ref_brand[0])]
+        all_purchases_without_brand.loc[:,["brand_sub_brand"]] = all_purchases_without_brand.brand 
+    if len(ref_brand)==2:
+        all_purchases_without_brand = all_purchases.loc[~((all_purchases.brand==ref_brand[0])&(all_purchases.sub_brand==ref_brand[1]))]
+        all_purchases_without_brand.loc[:,["brand_sub_brand"]] = all_purchases_without_brand.brand + "-" + all_purchases_without_brand.sub_brand
+    if len(ref_brand)==3:
+        all_purchases_without_brand = all_purchases.loc[~((all_purchases.brand==ref_brand[0])&(all_purchases.sub_brand==ref_brand[1])&(all_purchases.variant==ref_brand[2]))]
+        all_purchases_without_brand.loc[:,["brand_sub_brand"]] = all_purchases_without_brand.brand + "-" + all_purchases_without_brand.sub_brand + "-" + all_purchases_without_brand.variant
+#     if len(ref_brand)==4
+
+    for a in gain_due_to.keys():
+        volume_share_list+=[(all_purchases_without_brand.loc[all_purchases_without_brand.brand_sub_brand==a].volume.sum()/all_purchases_without_brand.volume.sum())*100]
+    interaction_df.loc[:,["percent_volume_share_adjusted"]] = volume_share_list
+    interaction_df.loc[:,["interaction_index"]] = round((interaction_df.percent_gain_loss/interaction_df.percent_volume_share_adjusted)*100)
+    
+    #presenting final numbers in the format used by Kelloggs's 
+    gain_loss_segments = ["Entry To/Lapse From Category","Incr/Decr in Cons.of Ref.Brand","Total Shift To/From Ref. Brand","Addn./Deletion from Repertoire"]
+    gain_loss_segments_net = [(gain[i]+loss[i])/1000 for i in range(4)]
+    gain_loss_segments_net_df = pd.DataFrame(data=[[gain_loss_segments[i],gain_loss_segments_net[i]] for i in range(4)],columns=["Type/Brand","net vol in 000Kgs"])
+    
+    net_df = pd.DataFrame(data=[["Brand Net Shift",round(net_gain/1000)/1000]],columns= ["Type/Brand","net vol in 000Kgs"])
+    
+    interaction_df_trimmed = interaction_df.loc[:,["Brands","interaction_index"]]
+    interaction_df_trimmed.rename(columns = {'Brands':'Type/Brand'}, inplace = True)
+    interaction_df_trimmed.loc[:,["net vol in 000Kgs"]] = [(gain_brand_switch_list[i] + loss_brand_switch_list[i])/1000 for i in range(len(gain_brand_switch_list))]
+    interaction_df_trimmed = interaction_df_trimmed[["Type/Brand","net vol in 000Kgs","interaction_index"]]
+    
+    top_info_df = pd.DataFrame(data = [["Reference_Brand: " + "-".join(ref_brand)],["Time_Period: "+ time_period_string]],columns=["Type/Brand"])
+
+    return pd.concat([top_info_df,net_df,gain_loss_segments_net_df,interaction_df_trimmed])
+    
+
+
+
+#INPUT
+brand_for_GNL = ["KELLOGG'S","CORN FLAKES"] #[brand] or [brand,sub_brand] or [brand,sub_brand,variant]
+p1_start = 28 # month_adj
+p1_end = 30 # month_adj
+p2_start = 31 # month_adj
+p2_end = 33 # month_adj
+category_info = {"scat":".isin(['READY TO EAT CEREALS','OATS & PORRIDGE'])"} # specify categories, scat, sscat to choose for which GNL to be analysed
+complete_data = pd.read_csv("../input/allcities-nov14/allcities_Nov14.csv", encoding='latin-1') #complete data (all cities,cat/scat/sscat/ time - p1 and p2 atleast) is required. Not filtered one. 
+city_name_list =[([1,2,3,4,5,6],"6Metros"),([1],"Hyd"),([2],"Blr"),([3],"Del"),([4],"Mum"),([5],"Kol"),([6],"Che")] #city/city combination for sheet generation
+
+
+#Output Generation
+
+pip install openpyxl
+
+month_num_dict = {1:"JAN",2:"FEB",3:"MAR",4:"APR",5:"MAY",6:"JUN",7:"JUL",8:"AUG",9:"SEP",10:"OCT",11:"NOV",12:"DEC"}
+p1_start_string = month_num_dict[p1_start%12]+str(19+p1_start//12)
+p1_end_string = month_num_dict[p1_end%12]+str(19+p1_end//12)
+p2_start_string = month_num_dict[p2_start%12]+str(19+p2_start//12)
+p2_end_string = month_num_dict[p2_end%12]+str(19+p2_end//12)
+time_period_string = p1_start_string+"-"+p1_end_string+"_vs_"+p2_start_string+"-"+p2_end_string
+
+with pd.ExcelWriter("GNL_"+ "_".join(brand_for_GNL)+"_"+time_period_string+".xlsx") as writer:  # doctest: +SKIP                                                                                                       
+    for c in city_name_list:
+        GNL_analysis(p1_start,p1_end,p2_start,p2_end,brand_for_GNL,c[0],category_info,complete_data).to_excel(writer, sheet_name=c[1])
+       
