@@ -248,7 +248,7 @@ city_name_list =[([1,2,3,4,5,6],"6Metros"),([1],"Hyd"),([2],"Blr"),([3],"Del"),(
 
 #Output Generation
 
-pip install openpyxl
+#pip install openpyxl
 
 month_num_dict = {1:"JAN",2:"FEB",3:"MAR",4:"APR",5:"MAY",6:"JUN",7:"JUL",8:"AUG",9:"SEP",10:"OCT",11:"NOV",12:"DEC"}
 p1_start_string = month_num_dict[p1_start%12]+str(19+p1_start//12)
